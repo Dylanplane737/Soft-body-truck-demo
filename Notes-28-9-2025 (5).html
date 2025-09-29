@@ -1,0 +1,212 @@
+<html>
+        <head><title>Downloaded HTML</title></head>
+        <body>
+            <pre style="white-space: pre-wrap; word-wrap: break-word;"><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Soft-Body Truck Demo</title>
+  <style>
+    html,body { margin:0; height:100%; overflow:hidden; background:#111; }
+    #overlay {
+      position: absolute; top: 12px; left: 12px;
+      background: rgba(0,0,0,0.45);
+      padding: 10px 12px; border-radius: 8px; color:#eee;
+      font-family: system-ui, sans-serif;
+    }
+    canvas { display:block; width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+<div id="overlay">
+  <h2>Soft-Body Truck Demo</h2>
+  <p>W/S throttle · A/D steer · click to lock pointer</p>
+</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js";
+import AmmoModule from "https://cdn.jsdelivr.net/npm/ammojs-typed@1.0.7/ammo.js";
+
+// main async init
+(async function() {
+  const Ammo = await AmmoModule();
+  let scene, camera, renderer, physicsWorld;
+  let rigidBodies = [], softBodies = [];
+  let vehicle = { chassis: null, wheels: [], wheelBodies: [] };
+
+  initThree();
+  initPhysics();
+  createGround();
+  await createSoftTruck();
+
+  const controls = { throttle:0, steer:0 };
+  window.addEventListener("keydown", e=>{
+    if (e.code==="KeyW") controls.throttle=1;
+    if (e.code==="KeyS") controls.throttle=-1;
+    if (e.code==="KeyA") controls.steer=1;
+    if (e.code==="KeyD") controls.steer=-1;
+  });
+  window.addEventListener("keyup", e=>{
+    if (["KeyW","KeyS"].includes(e.code)) controls.throttle=0;
+    if (["KeyA","KeyD"].includes(e.code)) controls.steer=0;
+  });
+  renderer.domElement.addEventListener("click", ()=>renderer.domElement.requestPointerLock());
+
+  let last = performance.now();
+  (function animate(){
+    requestAnimationFrame(animate);
+    const now = performance.now();
+    const dt = Math.min(1/30, (now-last)/1000); last=now;
+    stepPhysics(dt, controls);
+    renderer.render(scene, camera);
+  })();
+
+  // --- functions ---
+  function initThree(){
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x223);
+
+    camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 2000);
+    camera.position.set(0,3,8);
+
+    renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    window.addEventListener("resize",()=>{
+      camera.aspect=innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    scene.add(new THREE.HemisphereLight(0xbfd4ff,0x444,0.6));
+    const dl = new THREE.DirectionalLight(0xffffff,0.9);
+    dl.position.set(6,10,4); dl.castShadow=true; scene.add(dl);
+  }
+
+  function initPhysics(){
+    const cfg = new Ammo.btSoftBodyRigidBodyCollisionConfiguration();
+    const dispatcher = new Ammo.btCollisionDispatcher(cfg);
+    const bp = new Ammo.btDbvtBroadphase();
+    const solver = new Ammo.btSequentialImpulseConstraintSolver();
+    const sbSolver = new Ammo.btDefaultSoftBodySolver();
+    physicsWorld = new Ammo.btSoftRigidDynamicsWorld(dispatcher,bp,solver,cfg,sbSolver);
+    physicsWorld.setGravity(new Ammo.btVector3(0,-9.8,0));
+    physicsWorld.getWorldInfo().set_m_gravity(new Ammo.btVector3(0,-9.8,0));
+  }
+
+  function createGround(){
+    const groundGeo=new THREE.PlaneGeometry(200,200);
+    const groundMat=new THREE.MeshStandardMaterial({color:0x555});
+    const ground=new THREE.Mesh(groundGeo,groundMat);
+    ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
+
+    const shape=new Ammo.btBoxShape(new Ammo.btVector3(100,1,100));
+    const trans=new Ammo.btTransform(); trans.setIdentity();
+    trans.setOrigin(new Ammo.btVector3(0,-1,0));
+    const ms=new Ammo.btDefaultMotionState(trans);
+    const rb=new Ammo.btRigidBody(new Ammo.btRigidBodyConstructionInfo(0,ms,shape,new Ammo.btVector3(0,0,0)));
+    physicsWorld.addRigidBody(rb);
+  }
+
+  async function createSoftTruck(){
+    // chassis: soft plane
+    const w=2.2, l=3.6, gx=10, gy=6;
+    const geom=new THREE.PlaneGeometry(w,l,gx-1,gy-1);
+    geom.rotateX(-Math.PI/2);
+    const mat=new THREE.MeshStandardMaterial({color:0x2a7bff,side:THREE.DoubleSide});
+    const mesh=new THREE.Mesh(geom,mat);
+    mesh.castShadow=true; mesh.position.y=1.5; scene.add(mesh);
+    vehicle.chassis=mesh;
+
+    const verts=Array.from(geom.attributes.position.array);
+    const indices=Array.from(geom.index.array);
+    const sbh=new Ammo.btSoftBodyHelpers();
+    const sb=sbh.CreateFromTriMesh(physicsWorld.getWorldInfo(),
+      new Ammo.Float32Array(verts),
+      new Ammo.Int32Array(indices),
+      indices.length/3,true);
+    const cfg=sb.get_m_cfg(); cfg.set_viterations(40); cfg.set_piterations(40);
+    sb.get_m_materials().at(0).set_m_kLST(0.9);
+    sb.setTotalMass(15,false);
+    physicsWorld.addSoftBody(sb,1,-1); sb.setPose(true,false);
+    softBodies.push({sb,mesh});
+
+    // wheels
+    const wheelOffsets=[[-w/2+0.3,-l/2+0.5],[w/2-0.3,-l/2+0.5],[-w/2+0.3,l/2-0.5],[w/2-0.3,l/2-0.5]];
+    const nodePos=[]; const pos=geom.attributes.position;
+    for(let i=0;i<pos.count;i++) nodePos.push(new THREE.Vector3(pos.getX(i),pos.getY(i),pos.getZ(i)));
+    wheelOffsets.forEach(([ox,oz])=>{
+      // nearest node
+      let nearest=0,nd=1e9;
+      nodePos.forEach((p,i)=>{let d=(p.x-ox)**2+(p.z-oz)**2;if(d<nd){nd=d;nearest=i;}});
+      const wr=0.35;
+      const g=new THREE.CylinderGeometry(wr,wr,0.3,18);
+      g.rotateZ(Math.PI/2);
+      const m=new THREE.MeshStandardMaterial({color:0x222});
+      const wheel=new THREE.Mesh(g,m); wheel.castShadow=true; scene.add(wheel);
+      const body=addRigid(wheel,6);
+      vehicle.wheels.push(wheel); vehicle.wheelBodies.push(body);
+      sb.appendAnchor(nearest,body,false);
+    });
+  }
+
+  function addRigid(mesh,mass){
+    const pos=mesh.position, quat=mesh.quaternion;
+    const trans=new Ammo.btTransform(); trans.setIdentity();
+    trans.setOrigin(new Ammo.btVector3(pos.x,pos.y,pos.z));
+    trans.setRotation(new Ammo.btQuaternion(quat.x,quat.y,quat.z,quat.w));
+    const ms=new Ammo.btDefaultMotionState(trans);
+
+    const bbox=new THREE.Box3().setFromObject(mesh); const size=new THREE.Vector3(); bbox.getSize(size);
+    const shape=new Ammo.btBoxShape(new Ammo.btVector3(size.x*0.5,size.y*0.5,size.z*0.5));
+    const inertia=new Ammo.btVector3(0,0,0); shape.calculateLocalInertia(mass,inertia);
+    const rb=new Ammo.btRigidBody(new Ammo.btRigidBodyConstructionInfo(mass,ms,shape,inertia));
+    rb.setFriction(1);
+    physicsWorld.addRigidBody(rb);
+    rigidBodies.push({mesh,body:rb});
+    return rb;
+  }
+
+  function stepPhysics(dt,controls){
+    physicsWorld.stepSimulation(dt,10);
+
+    // sync rigid
+    rigidBodies.forEach(o=>{
+      const t=new Ammo.btTransform();
+      o.body.getMotionState().getWorldTransform(t);
+      const p=t.getOrigin(),q=t.getRotation();
+      o.mesh.position.set(p.x(),p.y(),p.z());
+      o.mesh.quaternion.set(q.x(),q.y(),q.z(),q.w());
+    });
+    // sync soft
+    softBodies.forEach(({sb,mesh})=>{
+      const nodes=sb.get_m_nodes(); const verts=mesh.geometry.attributes.position.array;
+      let idx=0;
+      for(let i=0;i<nodes.size();i++){
+        const n=nodes.at(i).get_m_x();
+        verts[idx++]=n.x(); verts[idx++]=n.y(); verts[idx++]=n.z();
+      }
+      mesh.geometry.attributes.position.needsUpdate=true;
+      mesh.geometry.computeVertexNormals();
+    });
+
+    // controls: apply impulses to wheels
+    vehicle.wheelBodies.forEach(body=>{
+      if(controls.throttle){
+        const force=new Ammo.btVector3(0,0,-controls.throttle*40*dt);
+        body.applyCentralImpulse(force);
+      }
+      if(controls.steer){
+        const torque=new Ammo.btVector3(0,controls.steer*10*dt,0);
+        body.applyTorqueImpulse(torque);
+      }
+    });
+  }
+})();
+</script>
+</body>
+</html>
+</pre>
+        </body>
+    </html>
